@@ -1,30 +1,29 @@
 import matplotlib.pyplot as plt
-
+import numpy as np
 from skimage.feature import hog
-from skimage import data, exposure
+from skimage import data, exposure, io, color, transform
 
 
-image = data.astronaut()
+def extract_features(image):
+    #Resize image
+    image = transform.resize(image, (320, 180))
 
-fd, hog_image = hog(
-    image,
-    orientations=8,
-    pixels_per_cell=(16, 16),
-    cells_per_block=(1, 1),
-    visualize=True,
-    channel_axis=-1,
-)
+    # HOG features
+    gray = color.rgb2gray(image)
+    hog_features = hog(
+        gray,
+        orientations=8,
+        pixels_per_cell=(16, 16),
+        cells_per_block=(1, 1),
+        feature_vector=True,
+        visualise=True,
+    )
 
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4), sharex=True, sharey=True)
+    # Color histogram
+    hsv_image = color.rgb2hsv(image)
+    hist_hue, _ = np.histogram(hsv_image[:,:,0], bins=8, range=(0, 255))
+    hist_sat, _ = np.histogram(hsv_image[:, :, 1], bins=8, range=(0, 255))
+    hist_val, _ = np.histogram(hsv_image[:, :, 2], bins=8, range=(0, 255))
 
-ax1.axis('off')
-ax1.imshow(image, cmap=plt.cm.gray)
-ax1.set_title('Input image')
 
-# Rescale histogram for better display
-hog_image_rescaled = exposure.rescale_intensity(hog_image, in_range=(0, 10))
-
-ax2.axis('off')
-ax2.imshow(hog_image_rescaled, cmap=plt.cm.gray)
-ax2.set_title('Histogram of Oriented Gradients')
-plt.show()
+image = "../BiomeData/biome1/biome_1_0.jpg"
