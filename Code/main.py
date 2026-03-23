@@ -4,7 +4,8 @@ from skimage.feature import hog
 from skimage import data, exposure
 
 
-image = data.astronaut()
+#image = data.astronaut()
+image = open("../BiomeData/biome_1_0.jpg")
 
 fd, hog_image = hog(
     image,
