@@ -2,20 +2,25 @@ import os
 import joblib
 import numpy as np
 import matplotlib.pyplot as plt
+from skimage.color import rgb2hsv
 
 from skimage.feature import hog
 from skimage import io, color, transform
 
 from sklearn.model_selection import train_test_split
 from sklearn.svm import LinearSVC
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.preprocessing import StandardScaler
 
+from lime import lime_image
+from skimage.segmentation import mark_boundaries
+from skimage.segmentation import slic
 
-# -------------------------
-# CONFIG
-# -------------------------
+def segmenter(img):
+    return slic(img, n_segments=50, compactness=10)
+
+
+# Preset paths
 dataset_path = "../BiomeData"
 test_folder = "../TestImages"
 MODEL_PATH = "model_bundle.pkl"
@@ -32,77 +37,117 @@ biome_map = {
 }
 
 
-# -------------------------
-# PREPROCESSING
-# -------------------------
+# Preprocessing
 def preprocess_image(path):
     img = io.imread(path)
-    img = transform.resize(img, (320, 180))
-
-    # Handle grayscale images
-    if len(img.shape) == 2:
-        img = np.stack([img] * 3, axis=-1)
-
-    # Handle RGBA images
-    elif img.shape[2] == 4:
-        img = img[:, :, :3]
+    img = transform.resize(img, (160, 160))
 
     return img
 
 
-# -------------------------
-# HOG FEATURES
-# -------------------------
+# Hog Features
 def extract_hog_features(gray_img):
-    return hog(
+    hog_feat, hog_img = hog(
         gray_img,
         orientations=8,
         pixels_per_cell=(8, 8),
         cells_per_block=(2, 2),
-        block_norm='L2-Hys'
+        block_norm='L2-Hys',
+        visualize = True
     )
+    return hog_feat, hog_img
 
 
-# -------------------------
-# COLOR FEATURES
-# -------------------------
+# Color Features
 def extract_color_features(img):
     hist_r = np.histogram(img[:, :, 0], bins=16, range=(0, 1))[0]
     hist_g = np.histogram(img[:, :, 1], bins=16, range=(0, 1))[0]
     hist_b = np.histogram(img[:, :, 2], bins=16, range=(0, 1))[0]
     return np.concatenate([hist_r, hist_g, hist_b])
 
+# HSV Features
+def extract_hsv_features(img):
+    h = img.shape[0]
 
-# -------------------------
-# EXPLANATION FUNCTION
-# -------------------------
-def explain_prediction(img):
-    avg_color = np.mean(img, axis=(0, 1))
-    brightness = np.mean(color.rgb2gray(img))
+    img = rgb2hsv(img)
+    img_top = img[:h//2, :, :]
+    img_bot = img[h//2:, :, :]
 
-    explanation = []
+    # For the top part of the image we try to mask out the sky parts
+    h_top, s_top, v_top = img_top[:, :, 0], img_top[:, :, 1], img_top[:, :, 2]
+    thresh_v = 0.9
+    thresh_s = 0.2
+    sky_mask = (v_top > thresh_v) & (s_top < thresh_s)
+    ground_mask = ~sky_mask
 
-    if avg_color[0] > 0.6 and avg_color[1] > 0.6:
-        explanation.append("Bright yellowish colors -> likely desert or beach")
+    hist_h_top = np.histogram(h_top[ground_mask], bins=16, range=(0, 1))[0]
+    hist_s_top = np.histogram(s_top[ground_mask], bins=16, range=(0, 1))[0]
+    hist_v_top = np.histogram(v_top[ground_mask], bins=16, range=(0, 1))[0]
+    hist_top = np.concatenate([hist_h_top, hist_s_top, hist_v_top])
 
-    if avg_color[2] > avg_color[0]:
-        explanation.append("Bluish tones -> could be snow or water nearby")
+    hist_h_bot = np.histogram(img_bot[:, :, 0], bins=16, range=(0, 1))[0]
+    hist_s_bot = np.histogram(img_bot[:, :, 1], bins=16, range=(0, 1))[0]
+    hist_v_bot = np.histogram(img_bot[:, :, 2], bins=16, range=(0, 1))[0]
+    hist_bot = np.concatenate([hist_h_bot, hist_s_bot, hist_v_bot])
 
-    if brightness < 0.4:
-        explanation.append("Dark image -> dense biome like forest or taiga")
-
-    if brightness > 0.7:
-        explanation.append("Very bright -> open biome like plains or desert")
-
-    if not explanation:
-        explanation.append("Biome determined mainly from texture patterns")
-
-    return explanation
+    return np.concatenate([hist_top, hist_bot])
 
 
-# -------------------------
-# LOAD DATASET
-# -------------------------
+# Lime Predict
+def lime_predict(images, svm, scaler):
+    features_list = []
+
+    for img in images:
+        # Resize (same as training)
+        img = transform.resize(img, (160, 160))
+
+        # Ensure RGB
+        if len(img.shape) == 2:
+            img = np.stack([img]*3, axis=-1)
+        elif img.shape[2] == 4:
+            img = img[:, :, :3]
+
+        gray = color.rgb2gray(img)
+
+        hog_features, _ = extract_hog_features(gray)
+        #color_features = extract_color_features(img)
+        hsv_features = extract_hsv_features(img)
+
+        features = np.concatenate([hog_features, hsv_features]) # color or hsv
+        features_list.append(features)
+
+    features_array = scaler.transform(features_list)
+
+    # IMPORTANT: LIME expects probabilities or scores
+    return svm.decision_function(features_array)
+
+def explain_with_lime(path, svm, scaler):
+    #img = io.imread(path)
+    img = preprocess_image(path)
+
+    explainer = lime_image.LimeImageExplainer()
+
+    explanation = explainer.explain_instance(
+        img,
+        lambda x: lime_predict(x, svm, scaler),
+        top_labels=1,
+        hide_color=0,
+        num_samples=500,
+        segmentation_fn = segmenter
+    )
+
+    temp, mask = explanation.get_image_and_mask(
+        explanation.top_labels[0],
+        positive_only=True,
+        num_features=5,
+        hide_rest=False
+    )
+
+    return temp, mask
+
+
+# Training model here --------------------------------------
+# Loading dataset
 def load_dataset():
     X = []
     y = []
@@ -117,6 +162,7 @@ def load_dataset():
 
         label = biome_map[folder_name]
         folder = os.path.join(dataset_path, folder_name)
+        count = 0
 
         if not os.path.isdir(folder):
             continue
@@ -131,9 +177,10 @@ def load_dataset():
                 img = preprocess_image(path)
                 gray = color.rgb2gray(img)
 
-                hog_features = extract_hog_features(gray)
-                color_features = extract_color_features(img)
-                features = np.concatenate([hog_features, color_features])
+                hog_features, _  = extract_hog_features(gray)
+                #color_features = extract_color_features(img)
+                hsv_features = extract_hsv_features(img)
+                features = np.concatenate([hog_features, hsv_features]) # color or hsv
 
                 X.append(features)
                 y.append(label)
@@ -142,6 +189,7 @@ def load_dataset():
                 count += 1
                 if count % 500 == 0:
                     print(f"Processed {count} images...")
+                    break
 
             except Exception as e:
                 print(f"Error processing {path}: {e}")
@@ -158,9 +206,7 @@ def load_dataset():
     return X, y
 
 
-# -------------------------
-# TRAIN AND SAVE MODEL
-# -------------------------
+# Train and save model
 def train_and_save_model():
     X, y = load_dataset()
 
@@ -178,18 +224,13 @@ def train_and_save_model():
 
     print("\nTraining SVM...")
     svm = LinearSVC(C=1.0, max_iter=5000)
+    #svm = SVC(kernel="rbf")
     svm.fit(X_train, y_train)
 
-    print("Training Random Forest...")
-    rf = RandomForestClassifier(n_estimators=150, max_depth=20, random_state=42)
-    rf.fit(X_train, y_train)
 
     svm_preds = svm.predict(X_test)
-    rf_preds = rf.predict(X_test)
 
-    print("\n====================")
     print("MODEL EVALUATION")
-    print("====================")
 
     print("\nSVM accuracy:", accuracy_score(y_test, svm_preds))
     print("\nSVM classification report:")
@@ -197,26 +238,18 @@ def train_and_save_model():
     print("SVM confusion matrix:")
     print(confusion_matrix(y_test, svm_preds))
 
-    print("\nRandom Forest accuracy:", accuracy_score(y_test, rf_preds))
-    print("\nRandom Forest classification report:")
-    print(classification_report(y_test, rf_preds))
-    print("Random Forest confusion matrix:")
-    print(confusion_matrix(y_test, rf_preds))
 
     joblib.dump({
         "svm": svm,
-        "rf": rf,
         "scaler": scaler
     }, MODEL_PATH)
 
     print(f"\nModel saved successfully to {MODEL_PATH}")
 
-    return svm, rf, scaler
+    return svm, scaler
 
 
-# -------------------------
-# LOAD OR TRAIN MODEL
-# -------------------------
+# load model (or call the train and save model function if no model found)
 def load_or_train_model():
     if os.path.exists(MODEL_PATH):
         print(f"Found trained model: {MODEL_PATH}")
@@ -224,11 +257,10 @@ def load_or_train_model():
 
         data = joblib.load(MODEL_PATH)
         svm = data["svm"]
-        rf = data["rf"]
         scaler = data["scaler"]
 
         print("Model loaded successfully.")
-        return svm, rf, scaler
+        return svm, scaler
 
     else:
         print("No trained model found.")
@@ -236,46 +268,70 @@ def load_or_train_model():
         return train_and_save_model()
 
 
-# -------------------------
-# PREDICT NEW IMAGES + SHOW
-# -------------------------
-def predict_image(path, svm, rf, scaler):
+# Predict new images
+def predict_image(path, svm, scaler):
     img = preprocess_image(path)
     gray = color.rgb2gray(img)
 
-    hog_features = extract_hog_features(gray)
-    color_features = extract_color_features(img)
+    hog_features, hog_image = extract_hog_features(gray)
+    #color_features = extract_color_features(img)
+    hsv_features = extract_hsv_features(img)
 
-    features = np.concatenate([hog_features, color_features])
+    features = np.concatenate([hog_features, hsv_features]) # color or hsv
     features = scaler.transform([features])
 
     svm_prediction = svm.predict(features)[0]
-    rf_prediction = rf.predict(features)[0]
-    explanation = explain_prediction(img)
-
-    plt.figure()
-    plt.imshow(img)
-    plt.axis("off")
-    plt.title(f"SVM: {svm_prediction} | RF: {rf_prediction}")
-    plt.show()
 
     print("\n-------------------------")
     print("Image:", path)
     print("SVM Prediction:", svm_prediction)
-    print("RF Prediction:", rf_prediction)
-    print("Reason:")
-    for e in explanation:
-        print("-", e)
+
+    temp, mask = explain_with_lime(path, svm, scaler)
+    lime_img = mark_boundaries(temp, mask)
+
+    fig, axes = plt.subplots(2, 3, figsize=(7, 7))
+
+    axes[0, 0].imshow(img)
+    axes[0, 0].set_title(f"OG img | SVM Prediction: {svm_prediction}")
+    axes[0, 0].axis("off")
+
+    hog_mask = mark_boundaries(hog_image, mask)
+    axes[0, 1].imshow(hog_mask, cmap="gray")
+    axes[0, 1].set_title("HOG Image")
+    axes[0, 1].axis("off")
+
+    axes[0, 2].imshow(lime_img)
+    axes[0, 2].set_title("LIME explanation")
+    axes[0, 2].axis("off")
+
+    hsv_img = color.rgb2hsv(img)
+    H, S, V  = hsv_img[:, :, 0], hsv_img[:, :, 1], hsv_img[:, :, 2]
+    thresh_v = 0.9
+    thresh_s = 0.2
+    sky_mask = (V > thresh_v) & (S > thresh_s)
+    ground_mask = ~sky_mask
+    #hsv_img = mark_boundaries(hsv_img, mask)
+    axes[1, 0].imshow(H[ground_mask], cmap="hsv")
+    axes[1, 0].set_title("Hue Image")
+    axes[1, 0].axis("off")
+
+    axes[1, 1].imshow(hsv_img[:, :, 1], cmap="hsv")
+    axes[1, 1].set_title("Saturation Image")
+    axes[1, 1].axis("off")
+
+    axes[1, 2].imshow(hsv_img[:, :, 2], cmap="hsv")
+    axes[1, 2].set_title("Value Image")
+    axes[1, 2].axis("off")
+
+    plt.tight_layout()
+    plt.show()
 
 
-# -------------------------
-# MAIN
-# -------------------------
-svm, rf, scaler = load_or_train_model()
+# Loading new images and predicts
+svm, scaler = load_or_train_model()
 
-print("\n====================")
 print("NEW IMAGE PREDICTIONS")
-print("====================")
+# Go through TestImages folder and predict images
 
 if os.path.exists(test_folder):
     found_images = False
@@ -285,7 +341,7 @@ if os.path.exists(test_folder):
             continue
 
         found_images = True
-        predict_image(os.path.join(test_folder, file), svm, rf, scaler)
+        predict_image(os.path.join(test_folder, file), svm, scaler)
 
     if not found_images:
         print("No image files found in ../TestImages")
