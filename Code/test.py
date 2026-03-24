@@ -37,7 +37,7 @@ biome_map = {
 # -------------------------
 def preprocess_image(path):
     img = io.imread(path)
-    img = transform.resize(img, (64, 64))
+    img = transform.resize(img, (320, 180))
 
     # Handle grayscale images
     if len(img.shape) == 2:
@@ -57,7 +57,7 @@ def extract_hog_features(gray_img):
     return hog(
         gray_img,
         orientations=8,
-        pixels_per_cell=(16, 16),
+        pixels_per_cell=(8, 8),
         cells_per_block=(2, 2),
         block_norm='L2-Hys'
     )
