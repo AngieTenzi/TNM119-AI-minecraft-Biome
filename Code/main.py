@@ -1,43 +1,45 @@
 import os
+
+import matplotlib.pyplot as plt
 import numpy as np
+from skimage.color import rgb2hsv
 
 from skimage.feature import hog
 from skimage import io, color, transform
 
 from sklearn.model_selection import train_test_split
-from sklearn.svm import LinearSVC
+from sklearn.svm import LinearSVC, SVC
 from sklearn.ensemble import RandomForestClassifier
 
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import StandardScaler
 
+import shap
+from lime import lime_image
 
-# -------------------------
-# PREPROCESSING
-# -------------------------
+import joblib
+from sklearn.pipeline import Pipeline
+
+# preprocessing
 def preprocess_image(path):
     img = io.imread(path)
-    img = transform.resize(img, (64, 64))  # smaller = MUCH faster
+    img = transform.resize(img, (64, 64))
     return img
 
 
-# -------------------------
-# HOG FEATURES (texture)
-# -------------------------
+#Hog features, lines/edges and textures
 def extract_hog_features(gray_img):
-    features = hog(
+    features, hog_image = hog(
         gray_img,
         orientations=8,
         pixels_per_cell=(16, 16),
         cells_per_block=(2, 2),
-        block_norm='L2-Hys'
+        visualize=True,
     )
-    return features
+    return features, hog_image
 
 
-# -------------------------
-# COLOR FEATURES
-# -------------------------
+# Color features
 def extract_color_features(img):
     hist_r = np.histogram(img[:, :, 0], bins=16, range=(0, 1))[0]
     hist_g = np.histogram(img[:, :, 1], bins=16, range=(0, 1))[0]
@@ -45,10 +47,16 @@ def extract_color_features(img):
 
     return np.concatenate([hist_r, hist_g, hist_b])
 
+# HSV features
+def extract_hsv_features(img):
+    img = rgb2hsv(img)
+    hist_h = np.histogram(img[:, :, 0], bins=16, range=(0, 1))[0]
+    hist_s = np.histogram(img[:, :, 1], bins=16, range=(0, 1))[0]
+    hist_v = np.histogram(img[:, :, 2], bins=16, range=(0, 1))[0]
 
-# -------------------------
-# EXPLANATION FUNCTION
-# -------------------------
+    return np.concatenate([hist_h, hist_s, hist_v])
+
+# Explanation
 def explain_prediction(img):
     avg_color = np.mean(img, axis=(0, 1))
     brightness = np.mean(color.rgb2gray(img))
@@ -73,9 +81,8 @@ def explain_prediction(img):
     return explanation
 
 
-# -------------------------
-# LOAD DATASET
-# -------------------------
+# Model is trained here
+# Load dataset
 X = []
 y = []
 
@@ -91,6 +98,7 @@ biome_map = {
     "biome_35": "Savanna",
     "biome_16": "Beach"
 }
+
 
 count = 0
 
@@ -115,7 +123,7 @@ for folder_name in os.listdir(dataset_path):
         img = preprocess_image(path)
         gray = color.rgb2gray(img)
 
-        hog_features = extract_hog_features(gray)
+        hog_features, _ = extract_hog_features(gray)
         color_features = extract_color_features(img)
 
         features = np.concatenate([hog_features, color_features])
@@ -124,81 +132,52 @@ for folder_name in os.listdir(dataset_path):
         y.append(label)
 
         count += 1
-        if count % 500 == 0:
+        if count % 1000 == 0:
             print(f"Processed {count} images...")
+            break
 
+
+print("\nDataset loaded")
 X = np.array(X)
 y = np.array(y)
 
 
-# -------------------------
-# TRAIN / TEST SPLIT
-# -------------------------
+# Train / test split
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2, random_state=42
 )
+print("\nSplit up train and test")
 
 
-# -------------------------
-# SCALE FEATURES
-# -------------------------
-scaler = StandardScaler()
+#Scale Features
+scaler = StandardScaler() # Imported function for scaling features
+# Fitting Data
 X_train = scaler.fit_transform(X_train)
 X_test = scaler.transform(X_test)
+print("\nFeatures scaled")
 
 
-# -------------------------
-# TRAIN MODELS
-# -------------------------
-svm = LinearSVC(C=1.0, max_iter=5000)
+# Fit models
+svm = LinearSVC(max_iter=5000)
 svm.fit(X_train, y_train)
+print("\nModels fit")
 
-rf = RandomForestClassifier(n_estimators=150, max_depth=20)
-rf.fit(X_train, y_train)
+#rf = RandomForestClassifier(n_estimators=150, max_depth=20)
+#rf.fit(X_train, y_train)
 
 
-# -------------------------
-# EVALUATE
-# -------------------------
+# Evaluate
 svm_preds = svm.predict(X_test)
-rf_preds = rf.predict(X_test)
+#rf_preds = rf.predict(X_test)
 
 print("\nSVM accuracy:", accuracy_score(y_test, svm_preds))
-print("RF accuracy:", accuracy_score(y_test, rf_preds))
+#print("RF accuracy:", accuracy_score(y_test, rf_preds))
 
+pipeline = Pipeline([
+    ("scaler", StandardScaler()),
+    ("svm", LinearSVC())
+])
 
-# -------------------------
-# PREDICT NEW IMAGES + EXPLAIN
-# -------------------------
-def predict_image(path):
-    img = preprocess_image(path)
-    gray = color.rgb2gray(img)
+pipeline.fit(X_train, y_train)
 
-    hog_features = extract_hog_features(gray)
-    color_features = extract_color_features(img)
-
-    features = np.concatenate([hog_features, color_features])
-    features = scaler.transform([features])
-
-    prediction = svm.predict(features)[0]
-    explanation = explain_prediction(img)
-
-    print("\nImage:", path)
-    print("Prediction:", prediction)
-    print("Reason:")
-    for e in explanation:
-        print("-", e)
-
-
-# -------------------------
-# TEST ON NEW IMAGES
-# -------------------------
-test_folder = "../TestImages"
-
-if os.path.exists(test_folder):
-    for file in os.listdir(test_folder):
-
-        if not file.lower().endswith(('.png', '.jpg', '.jpeg')):
-            continue
-
-        predict_image(os.path.join(test_folder, file))
+joblib.dump(pipeline, "../model.pkl")
