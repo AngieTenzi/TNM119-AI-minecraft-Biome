@@ -79,7 +79,7 @@ def extract_hog_features(gray_img):
         block_norm='L2-Hys',
         visualize=True
     )
-    hog_feat = np.concatenate([hog_top, hog_bot])
+    hog_feat = np.concatenate([hog_top*0.2, hog_bot])
     return hog_feat, hog_img
 
 
@@ -100,11 +100,15 @@ def extract_hsv_features(img):
 
     # For the top part of the image we try to mask out the sky parts
     h_top, s_top, v_top = img_top[:, :, 0], img_top[:, :, 1], img_top[:, :, 2]
-    thresh_v = 0.9
-    thresh_s = 0.2
+    #thresh_v = 0.9
+    #thresh_s = 0.2
     thresh_h = 0.58
     sky_mask = (h_top > thresh_h) # (s_top < thresh_s) & (v_top > thresh_v)
     ground_mask = ~sky_mask
+
+    #gmask = img[:, :, 0] > thresh_h
+    #gmask = ~gmask
+
 
     hist_h_top = np.histogram(h_top*ground_mask, bins=16, range=(0, 1))[0]
     hist_s_top = np.histogram(s_top*ground_mask, bins=16, range=(0, 1))[0]
@@ -139,9 +143,11 @@ def lime_predict(images, svm, scaler):
 
         gray = color.rgb2gray(img)
 
+        hsv_features = extract_hsv_features(img)
+        #gray = gray * gmask
         hog_features, _ = extract_hog_features(gray)
         #color_features = extract_color_features(img)
-        hsv_features = extract_hsv_features(img)
+
         # HOG implementation here-------------------------------------------------------------------
         features = np.concatenate([hog_features, hsv_features]) # color or hsv
         features_list.append(features)
@@ -207,9 +213,11 @@ def load_dataset():
                 img = preprocess_image(path)
                 gray = color.rgb2gray(img)
 
+                hsv_features = extract_hsv_features(img)
+                #gray = gray*gmask
                 hog_features, _  = extract_hog_features(gray)
                 #color_features = extract_color_features(img)
-                hsv_features = extract_hsv_features(img)
+
                 features = np.concatenate([hog_features, hsv_features]) # color or hsv
                 # HOG implementation here-------------------------------------------------------------------
                 X.append(features)
@@ -241,7 +249,7 @@ def train_and_save_model():
     X, y = load_dataset()
 
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
+        X, y, test_size=0.2, stratify=y
     )
 
     print("\nTrain/Test split:")
@@ -307,9 +315,11 @@ def predict_image(path, svm, scaler):
     img = preprocess_image(path)
     gray = color.rgb2gray(img)
 
+    hsv_features = extract_hsv_features(img)
+    #gray = gray * gmask
     hog_features, hog_image = extract_hog_features(gray)
     #color_features = extract_color_features(img)
-    hsv_features = extract_hsv_features(img)
+
     # HOG implementation here-------------------------------------------------------------------
     features = np.concatenate([hog_features, hsv_features]) # color or hsv
     features = scaler.transform([features])
