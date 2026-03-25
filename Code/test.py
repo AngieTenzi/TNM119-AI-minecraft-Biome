@@ -351,7 +351,21 @@ def predict_image(path, svm, scaler):
     axes[1, 2].axis("off")
 
     plt.tight_layout()
-    plt.show()
+    # plt.show()
+
+    # Create output folder if it doesn't exist
+    os.makedirs("Output_2", exist_ok=True)
+
+    # Create filename based on image name
+    base_name = os.path.basename(path)
+    name_without_ext = os.path.splitext(base_name)[0]
+
+    save_path = os.path.join("Output_2", f"{name_without_ext}_result.png")
+
+    plt.savefig(save_path, dpi=300)
+    plt.close()  # VERY important when looping
+
+    print(f"Saved figure to: {save_path}")
 
 
 # Loading new images and predicts
