@@ -9,6 +9,7 @@ from skimage import io, color, transform
 
 from sklearn.model_selection import train_test_split
 from sklearn.svm import LinearSVC
+from sklearn.svm import SVC
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.preprocessing import StandardScaler
 
@@ -17,7 +18,7 @@ from skimage.segmentation import mark_boundaries
 from skimage.segmentation import slic
 
 def segmenter(img):
-    return slic(img, n_segments=50, compactness=10)
+    return slic(img, n_segments=70, compactness=10)
 
 
 # Preset paths
@@ -42,19 +43,43 @@ def preprocess_image(path):
     img = io.imread(path)
     img = transform.resize(img, (160, 160))
 
+    if len(img.shape) == 2:
+        img = np.stack([img] * 3, axis=-1)
+    elif img.shape[2] == 4:
+        img = img[:, :, :3]
+
     return img
 
 
 # Hog Features
 def extract_hog_features(gray_img):
-    hog_feat, hog_img = hog(
+    h = gray_img.shape[0]
+    top = gray_img[:h//2, :]
+    bot = gray_img[h//2:, :]
+
+    hog_top = hog(
+        top,
+        orientations=8,
+        pixels_per_cell=(8, 8),
+        cells_per_block=(2, 2),
+        block_norm='L2-Hys',
+    )
+    hog_bot = hog(
+        bot,
+        orientations=8,
+        pixels_per_cell=(8, 8),
+        cells_per_block=(2, 2),
+        block_norm='L2-Hys',
+    )
+    hog_full, hog_img = hog(
         gray_img,
         orientations=8,
         pixels_per_cell=(8, 8),
         cells_per_block=(2, 2),
         block_norm='L2-Hys',
-        visualize = True
+        visualize=True
     )
+    hog_feat = np.concatenate([hog_top, hog_bot])
     return hog_feat, hog_img
 
 
@@ -77,18 +102,23 @@ def extract_hsv_features(img):
     h_top, s_top, v_top = img_top[:, :, 0], img_top[:, :, 1], img_top[:, :, 2]
     thresh_v = 0.9
     thresh_s = 0.2
-    sky_mask = (v_top > thresh_v) & (s_top < thresh_s)
+    thresh_h = 0.58
+    sky_mask = (h_top > thresh_h) # (s_top < thresh_s) & (v_top > thresh_v)
     ground_mask = ~sky_mask
 
-    hist_h_top = np.histogram(h_top[ground_mask], bins=16, range=(0, 1))[0]
-    hist_s_top = np.histogram(s_top[ground_mask], bins=16, range=(0, 1))[0]
-    hist_v_top = np.histogram(v_top[ground_mask], bins=16, range=(0, 1))[0]
+    hist_h_top = np.histogram(h_top*ground_mask, bins=16, range=(0, 1))[0]
+    hist_s_top = np.histogram(s_top*ground_mask, bins=16, range=(0, 1))[0]
+    hist_v_top = np.histogram(v_top*ground_mask, bins=16, range=(0, 1))[0]
     hist_top = np.concatenate([hist_h_top, hist_s_top, hist_v_top])
+
 
     hist_h_bot = np.histogram(img_bot[:, :, 0], bins=16, range=(0, 1))[0]
     hist_s_bot = np.histogram(img_bot[:, :, 1], bins=16, range=(0, 1))[0]
     hist_v_bot = np.histogram(img_bot[:, :, 2], bins=16, range=(0, 1))[0]
     hist_bot = np.concatenate([hist_h_bot, hist_s_bot, hist_v_bot])
+
+    # plt.imshow(h_top*ground_mask)
+    # plt.show()
 
     return np.concatenate([hist_top, hist_bot])
 
@@ -112,13 +142,13 @@ def lime_predict(images, svm, scaler):
         hog_features, _ = extract_hog_features(gray)
         #color_features = extract_color_features(img)
         hsv_features = extract_hsv_features(img)
-
+        # HOG implementation here-------------------------------------------------------------------
         features = np.concatenate([hog_features, hsv_features]) # color or hsv
         features_list.append(features)
 
     features_array = scaler.transform(features_list)
 
-    # IMPORTANT: LIME expects probabilities or scores
+    #
     return svm.decision_function(features_array)
 
 def explain_with_lime(path, svm, scaler):
@@ -139,7 +169,7 @@ def explain_with_lime(path, svm, scaler):
     temp, mask = explanation.get_image_and_mask(
         explanation.top_labels[0],
         positive_only=True,
-        num_features=5,
+        num_features=7,
         hide_rest=False
     )
 
@@ -181,7 +211,7 @@ def load_dataset():
                 #color_features = extract_color_features(img)
                 hsv_features = extract_hsv_features(img)
                 features = np.concatenate([hog_features, hsv_features]) # color or hsv
-
+                # HOG implementation here-------------------------------------------------------------------
                 X.append(features)
                 y.append(label)
                 class_counts[label] += 1
@@ -241,7 +271,8 @@ def train_and_save_model():
 
     joblib.dump({
         "svm": svm,
-        "scaler": scaler
+        "scaler": scaler,
+        "acc": accuracy_score(y_test, svm_preds),
     }, MODEL_PATH)
 
     print(f"\nModel saved successfully to {MODEL_PATH}")
@@ -258,8 +289,11 @@ def load_or_train_model():
         data = joblib.load(MODEL_PATH)
         svm = data["svm"]
         scaler = data["scaler"]
+        acc = data["acc"]
 
         print("Model loaded successfully.")
+        print(f"Accuracy: {acc}")
+
         return svm, scaler
 
     else:
@@ -276,7 +310,7 @@ def predict_image(path, svm, scaler):
     hog_features, hog_image = extract_hog_features(gray)
     #color_features = extract_color_features(img)
     hsv_features = extract_hsv_features(img)
-
+    # HOG implementation here-------------------------------------------------------------------
     features = np.concatenate([hog_features, hsv_features]) # color or hsv
     features = scaler.transform([features])
 
@@ -305,13 +339,9 @@ def predict_image(path, svm, scaler):
     axes[0, 2].axis("off")
 
     hsv_img = color.rgb2hsv(img)
-    H, S, V  = hsv_img[:, :, 0], hsv_img[:, :, 1], hsv_img[:, :, 2]
-    thresh_v = 0.9
-    thresh_s = 0.2
-    sky_mask = (V > thresh_v) & (S > thresh_s)
-    ground_mask = ~sky_mask
+
     #hsv_img = mark_boundaries(hsv_img, mask)
-    axes[1, 0].imshow(H[ground_mask], cmap="hsv")
+    axes[1, 0].imshow(hsv_img[:, :, 0], cmap="hsv")
     axes[1, 0].set_title("Hue Image")
     axes[1, 0].axis("off")
 
