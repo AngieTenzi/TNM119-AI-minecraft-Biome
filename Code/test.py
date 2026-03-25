@@ -82,7 +82,7 @@ def extract_hog_features(gray_img):
     # Normalization for visuals
     hog_img = (hog_img - hog_img.min()) / (hog_img.max() - hog_img.min())
 
-    hog_feat = np.concatenate([hog_top*0.1, hog_bot])
+    hog_feat = np.concatenate([hog_top*0, hog_bot])
 
     return hog_feat, hog_img
 
@@ -240,7 +240,7 @@ def train_and_save_model():
     X, y = load_dataset()
 
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=20, stratify=y
+        X, y, test_size=0.2, stratify=y
     )
 
     print("\nTrain/Test split:")
