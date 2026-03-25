@@ -79,7 +79,11 @@ def extract_hog_features(gray_img):
         block_norm='L2-Hys',
         visualize=True
     )
-    hog_feat = np.concatenate([hog_top*0.2, hog_bot])
+    # Normalization for visuals
+    hog_img = (hog_img - hog_img.min()) / (hog_img.max() - hog_img.min())
+
+    hog_feat = np.concatenate([hog_top*0.1, hog_bot])
+
     return hog_feat, hog_img
 
 
@@ -100,19 +104,14 @@ def extract_hsv_features(img):
 
     # For the top part of the image we try to mask out the sky parts
     h_top, s_top, v_top = img_top[:, :, 0], img_top[:, :, 1], img_top[:, :, 2]
-    #thresh_v = 0.9
-    #thresh_s = 0.2
+
     thresh_h = 0.58
-    sky_mask = (h_top > thresh_h) # (s_top < thresh_s) & (v_top > thresh_v)
+    sky_mask = (h_top > thresh_h)
     ground_mask = ~sky_mask
 
-    #gmask = img[:, :, 0] > thresh_h
-    #gmask = ~gmask
-
-
-    hist_h_top = np.histogram(h_top*ground_mask, bins=16, range=(0, 1))[0]
-    hist_s_top = np.histogram(s_top*ground_mask, bins=16, range=(0, 1))[0]
-    hist_v_top = np.histogram(v_top*ground_mask, bins=16, range=(0, 1))[0]
+    hist_h_top = np.histogram(h_top[ground_mask], bins=16, range=(0, 1))[0]
+    hist_s_top = np.histogram(s_top[ground_mask], bins=16, range=(0, 1))[0]
+    hist_v_top = np.histogram(v_top[ground_mask], bins=16, range=(0, 1))[0]
     hist_top = np.concatenate([hist_h_top, hist_s_top, hist_v_top])
 
 
@@ -128,14 +127,13 @@ def extract_hsv_features(img):
 
 
 # Lime Predict
-def lime_predict(images, svm, scaler):
+def lime_predict(images):
     features_list = []
 
     for img in images:
-        # Resize (same as training)
+        # Resize // preprocessing
         img = transform.resize(img, (160, 160))
 
-        # Ensure RGB
         if len(img.shape) == 2:
             img = np.stack([img]*3, axis=-1)
         elif img.shape[2] == 4:
@@ -143,29 +141,25 @@ def lime_predict(images, svm, scaler):
 
         gray = color.rgb2gray(img)
 
-        hsv_features = extract_hsv_features(img)
-        #gray = gray * gmask
         hog_features, _ = extract_hog_features(gray)
-        #color_features = extract_color_features(img)
+        hsv_features = extract_hsv_features(img)
 
-        # HOG implementation here-------------------------------------------------------------------
-        features = np.concatenate([hog_features, hsv_features]) # color or hsv
+        features = np.concatenate([hog_features, hsv_features])
         features_list.append(features)
 
     features_array = scaler.transform(features_list)
 
-    #
     return svm.decision_function(features_array)
 
-def explain_with_lime(path, svm, scaler):
-    #img = io.imread(path)
+
+def explain_with_lime(path):
     img = preprocess_image(path)
 
     explainer = lime_image.LimeImageExplainer()
 
     explanation = explainer.explain_instance(
         img,
-        lambda x: lime_predict(x, svm, scaler),
+        lambda x: lime_predict(x),
         top_labels=1,
         hide_color=0,
         num_samples=500,
@@ -175,8 +169,8 @@ def explain_with_lime(path, svm, scaler):
     temp, mask = explanation.get_image_and_mask(
         explanation.top_labels[0],
         positive_only=True,
-        num_features=7,
-        hide_rest=False
+        num_features=5,
+        hide_rest=True
     )
 
     return temp, mask
@@ -213,13 +207,10 @@ def load_dataset():
                 img = preprocess_image(path)
                 gray = color.rgb2gray(img)
 
-                hsv_features = extract_hsv_features(img)
-                #gray = gray*gmask
                 hog_features, _  = extract_hog_features(gray)
-                #color_features = extract_color_features(img)
+                hsv_features = extract_hsv_features(img)
 
-                features = np.concatenate([hog_features, hsv_features]) # color or hsv
-                # HOG implementation here-------------------------------------------------------------------
+                features = np.concatenate([hog_features, hsv_features])
                 X.append(features)
                 y.append(label)
                 class_counts[label] += 1
@@ -249,7 +240,7 @@ def train_and_save_model():
     X, y = load_dataset()
 
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, stratify=y
+        X, y, test_size=0.2, random_state=20, stratify=y
     )
 
     print("\nTrain/Test split:")
@@ -315,13 +306,10 @@ def predict_image(path, svm, scaler):
     img = preprocess_image(path)
     gray = color.rgb2gray(img)
 
-    hsv_features = extract_hsv_features(img)
-    #gray = gray * gmask
     hog_features, hog_image = extract_hog_features(gray)
-    #color_features = extract_color_features(img)
+    hsv_features = extract_hsv_features(img)
 
-    # HOG implementation here-------------------------------------------------------------------
-    features = np.concatenate([hog_features, hsv_features]) # color or hsv
+    features = np.concatenate([hog_features, hsv_features])
     features = scaler.transform([features])
 
     svm_prediction = svm.predict(features)[0]
@@ -330,7 +318,7 @@ def predict_image(path, svm, scaler):
     print("Image:", path)
     print("SVM Prediction:", svm_prediction)
 
-    temp, mask = explain_with_lime(path, svm, scaler)
+    temp, mask = explain_with_lime(path)
     lime_img = mark_boundaries(temp, mask)
 
     fig, axes = plt.subplots(2, 3, figsize=(7, 7))
@@ -339,8 +327,8 @@ def predict_image(path, svm, scaler):
     axes[0, 0].set_title(f"OG img | SVM Prediction: {svm_prediction}")
     axes[0, 0].axis("off")
 
-    hog_mask = mark_boundaries(hog_image, mask)
-    axes[0, 1].imshow(hog_mask, cmap="gray")
+    #hog_mask = mark_boundaries(hog_image, mask)
+    axes[0, 1].imshow(hog_image, cmap="gray")
     axes[0, 1].set_title("HOG Image")
     axes[0, 1].axis("off")
 
@@ -350,7 +338,6 @@ def predict_image(path, svm, scaler):
 
     hsv_img = color.rgb2hsv(img)
 
-    #hsv_img = mark_boundaries(hsv_img, mask)
     axes[1, 0].imshow(hsv_img[:, :, 0], cmap="hsv")
     axes[1, 0].set_title("Hue Image")
     axes[1, 0].axis("off")
